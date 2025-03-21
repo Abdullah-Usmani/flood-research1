@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flood Prediction Project</title>
+    <link rel="stylesheet" href="styling/style.css">
+</head>
+<body>
+    <h1>Flood Prediction</h1>
+    <hr>
+    <div class="container">
+        <div class="weather-input">
+            <h3>Enter your coordinates</h3> 
+            <input type="text" class="lat-input" placeholder="Enter Latitude">
+            <input type="text" class="lon-input" placeholder="Enter Longitude">
+            <button class="search-btn">Search</button>
+            <div class="separator"></div>
+            <button class="location-btn">Use current coordinates</button>
+        </div>
+
+        <div class="location-output"></div>
+
+        <!-- Dynamic Weather Information -->
+        <div class="weather-data">
+            <h2 id="weather-location">Location: Not Available</h2>
+            
+            <!-- Container for displaying weather details for multiple days -->
+            <div id="weather-details">
+                <!-- JavaScript will dynamically insert the weather details here -->
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

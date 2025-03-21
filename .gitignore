@@ -1,0 +1,10 @@
+data/
+archive/
+.vscode/
+__pycache__/
+.vscode/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+FloodLearning.code-workspace

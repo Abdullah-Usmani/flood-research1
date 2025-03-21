@@ -64,23 +64,23 @@ def compute_rolling(df, horizon, col):
 
 # %%
 def CAMELSrun(data_id, horizon1, horizon2, target_var, SYM_M):
-    df = loadData(f'Data/Idaho/{data_id}_streamflow_qc.txt', f'Data/Idaho/{data_id}_lump_maurer_forcing_leap.txt')
+    df = loadData(f'data/CAMELS/{data_id}_streamflow_qc.txt', f'data/CAMELS/{data_id}_lump_maurer_forcing_leap.txt')
     rolling_horizons = [horizon1, horizon2]
 
     for horizon in rolling_horizons:
-        for col in ['prcp(mm/day)', 'srad(W/m2)', 'Flow0', 'tmax(C)', 'tmin(C)', 'vp(Pa)']:
+        for col in ['prcp(mm/day)', 'srad(W/m2)', 'Flow0', 'tmax(C)', 'tmin(C)']:
             df = compute_rolling(df, horizon, col)
 
     df = df.fillna(0)
 
-    for col in ['prcp(mm/day)', 'srad(W/m2)', 'Flow0', 'tmax(C)', 'tmin(C)', 'vp(Pa)']:
+    for col in ['prcp(mm/day)', 'srad(W/m2)', 'Flow0', 'tmax(C)', 'tmin(C)']:
         df[f'month_avg_{col}'] = df[col].groupby(df.index.month, group_keys=False).apply(expand_mean)
         df[f'day_avg_{col}'] = df[col].groupby(df.index.day_of_year, group_keys=False).apply(expand_mean)
 
     # List of features to drop based on importance scores
     features_to_drop = [
-        'SYM_A', 'SYM_A:e', 'SYM_nan', 'swe(mm)',
-        'Year', 'Day', 
+        'SYM_A', 'SYM_A:e', 'SYM_nan', 'swe(mm)', 'vp(Pa)',
+        'Year', 'Day', 'dayl(s)',
         # 'tmax(C)', 'tmin(C)', 
         # 'rolling_3_prcp(mm/day)', 'rolling_3_srad(W/m2)_pct',
         # 'rolling_3_tmax(C)_pct', 'rolling_3_tmin(C)_pct',
@@ -241,7 +241,7 @@ def permutation_importance(model, X_test, y_test, metric=mean_squared_error):
     return np.array(importances)
 
 # %%
-def backtest(df, model, X, Y, train_window_size, test_window_size, drop_before_index):
+def backtest(df, model, epochsno, X, Y, train_window_size, test_window_size, drop_before_index):
     all_predictions = []
     early_stopping = EarlyStopping(monitor='val_loss', patience=4, restore_best_weights=True)
     # feature_importances = np.zeros(len(X))
@@ -287,7 +287,7 @@ def backtest(df, model, X, Y, train_window_size, test_window_size, drop_before_i
         Y_test = test[[Y_column]]
         Y_test = scaler_Y.transform(Y_test).reshape(-1, 1) 
 
-        model.fit(X_train, Y_train, epochs=15, verbose=1, validation_split=0.2, callbacks=[early_stopping])
+        model.fit(X_train, Y_train, epochs=epochsno, verbose=1, validation_split=0.1, callbacks=[early_stopping])
 
         preds = model.predict(X_test)
 
