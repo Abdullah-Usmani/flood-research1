@@ -6,5 +6,8 @@ __pycache__/
 .ipynb_checkpoints/
 .venv/
 venv/
-
+modelOutputs/
+models/
+test.py
+MLP copy.ipynb
 FloodLearning.code-workspace

@@ -8,12 +8,10 @@ from sklearn.multioutput import MultiOutputRegressor
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV
 from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error, mean_absolute_percentage_error
 from sklearn.linear_model import Ridge
-import tensorflow as tf
-from tensorflow import keras
-from keras.callbacks import EarlyStopping
-from keras.models import Sequential
-from keras.layers import Dense, Dropout
-from tensorflow.keras.layers import Dense
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
@@ -49,19 +47,6 @@ def compute_rolling(df, horizon, col):
     df[label] = df[col].rolling(horizon).mean()
     df[f"{label}_pct"] = pct_diff(df[label], df[col])
     return df
-
-# rolling_horizons = [3, 7]
-
-# for horizon in rolling_horizons:
-#     for col in ['prcp(mm/day)', 'srad(W/m2)', 'Flow0', 'tmax(C)', 'tmin(C)', 'vp(Pa)']:
-#         df = compute_rolling(df, horizon, col)
-
-# df = df.fillna(0)
-
-# for col in ['prcp(mm/day)', 'srad(W/m2)', 'tmax(C)', 'Flow0', 'tmin(C)', 'vp(Pa)']:
-#     df[f'month_avg_{col}'] = df[col].groupby(df.index.month, group_keys=False).apply(expand_mean)
-#     df[f'day_avg_{col}'] = df[col].groupby(df.index.day_of_year, group_keys=False).apply(expand_mean)
-
 # %%
 def CAMELSrun(data_id, horizon1, horizon2, target_var, SYM_M):
     df = loadData(f'data/CAMELS/{data_id}_streamflow_qc.txt', f'data/CAMELS/{data_id}_lump_maurer_forcing_leap.txt')
@@ -110,8 +95,150 @@ def CAMELSrun(data_id, horizon1, horizon2, target_var, SYM_M):
     X = adjX.columns
 
     return df, X, Y
+# %%
+def backtest(df, model, X, Y, epochsno, train_window_size, test_window_size, drop_before_index, device, patience=15, batch_size=32):
+        
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    
+    all_predictions = []
+    scaler_X = StandardScaler()
+    scaler_Y = StandardScaler()
+    
+    if drop_before_index is not None:
+        df = df[df.index >= drop_before_index]
+    
+    num_iterations = 0
+    
+    if isinstance(Y, pd.Series):
+        Y_column = Y.name
+    else:
+        Y_column = Y
+    
+    test_indices = []
+    
+    for i in range(0, df.shape[0] - train_window_size - test_window_size + 1, test_window_size):
+        num_iterations += 1
+        
+        train = df.iloc[i:(i+train_window_size), :]
+        test = df.iloc[(i+train_window_size):(i+train_window_size+test_window_size), :]
+        
+        test_indices.extend(test.index)
+        
+        X_train = scaler_X.fit_transform(train[X])
+        X_test = scaler_X.transform(test[X])
+        Y_train = scaler_Y.fit_transform(train[[Y_column]]).reshape(-1, 1)
+        Y_test = scaler_Y.transform(test[[Y_column]]).reshape(-1, 1)
+        
+        if device == "cpu":
+            X_train_tensor = torch.tensor(X_train, dtype=torch.float32).view(-1, X_train.shape[1])
+            Y_train_tensor = torch.tensor(Y_train, dtype=torch.float32).view(-1, 1)
+            X_test_tensor = torch.tensor(X_test, dtype=torch.float32).view(-1, X_test.shape[1])
+        else: 
+            X_train_tensor = torch.tensor(X_train, dtype=torch.float32).view(-1, X_train.shape[1]).to(device)
+            Y_train_tensor = torch.tensor(Y_train, dtype=torch.float32).view(-1, 1).to(device)
+            X_test_tensor = torch.tensor(X_test, dtype=torch.float32).view(-1, X_test.shape[1]).to(device)
+        
+        train_dataset = TensorDataset(X_train_tensor, Y_train_tensor)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+        model.train()
+        best_loss = float('inf')
+        epochs_no_improve = 0
+        for epoch in range(epochsno):
+            epoch_loss = 0.0
+            for batch_X, batch_Y in train_loader:
+                optimizer.zero_grad()
+                outputs = model(batch_X)  # Extract the output tensor
+                loss = criterion(outputs, batch_Y)
+                loss.backward()
+                optimizer.step()
+                epoch_loss += loss.item()
+            epoch_loss /= len(train_loader)
+            print(f"Epoch {epoch+1}/{epochsno}, Loss: {epoch_loss}")
+            
+            # Early stopping
+            if epoch_loss < best_loss:
+                best_loss = epoch_loss
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+                if epochs_no_improve >= patience:
+                    print(f"Early stopping at epoch {epoch+1}")
+                    break
+        
+        model.eval()
+        with torch.no_grad():
+            preds = model(X_test_tensor)  # Extract the output tensor
+            if device == "cpu":
+                preds = preds.numpy()
+            else:
+                preds = preds.cpu().numpy()
+        
+        preds = scaler_Y.inverse_transform(preds).flatten()
+        Y_test = scaler_Y.inverse_transform(Y_test).flatten()
+        
+        combined = pd.DataFrame({
+            "actual": Y_test,
+            "prediction": preds
+        }, index=test.index)
+        
+        combined["diff"] = (combined["prediction"] - combined["actual"]).abs()
+        all_predictions.append(combined)
+    
+    all_predictions = pd.concat(all_predictions, axis=0)
+    datetime = pd.Index(test_indices)
+    return all_predictions, datetime
 
 # %%
+def standardtest(df, model, X, Y, device):
+    all_predictions = []
+    
+    scaler_X = StandardScaler()
+    scaler_Y = StandardScaler()
+
+    if isinstance(Y, pd.Series):
+        Y_column = Y.name
+    else:
+        Y_column = Y
+
+    # Scale features
+    X_test = df[X]
+    X_test = scaler_X.fit_transform(X_test)
+    X_test = torch.tensor(X_test, dtype=torch.float32).to(device)  # Convert to PyTorch tensor
+
+    # Scale target variable
+    Y_test = df[[Y_column]]
+    Y_test = scaler_Y.fit_transform(Y_test).reshape(-1, 1)
+    
+    # Convert to tensor
+    # Y_test_tensor = torch.tensor(Y_test, dtype=torch.float32).to(device)
+
+    # Make predictions
+    model.eval()  # Set model to evaluation mode
+    with torch.no_grad():
+        preds = model(X_test).cpu().numpy()
+
+    # Inverse transform predictions and actual values
+    preds = scaler_Y.inverse_transform(preds).reshape(-1, 1).flatten()
+    # Y_test = scaler_Y.inverse_transform(Y_test_tensor.numpy()).reshape(-1, 1).flatten()
+
+    # Store results in DataFrame
+    combined = pd.DataFrame({
+        "actual": Y_test,
+        "prediction": preds
+    })
+
+    combined["diff"] = (combined["prediction"] - combined["actual"]).abs()
+    all_predictions.append(combined)
+
+    all_predictions = pd.concat(all_predictions, axis=0)
+
+    # Create a datetime index for all test predictions
+    datetime = df.index
+
+    return all_predictions, datetime
+
 def visualization(datetime, y_pred, y_test, zoom_start, zoom_end):
     mae = mean_absolute_error(y_test, y_pred)
     mse = mean_squared_error(y_test, y_pred)
@@ -188,45 +315,6 @@ def visualization(datetime, y_pred, y_test, zoom_start, zoom_end):
     plt.grid(True)
     plt.show()
 
-
-# # %%
-# df, X, Y = CAMELSrun('13340000', 3, 7, 'Flow+2', False)
-
-# # %%
-# model = keras.Sequential([
-#     Dense(32, activation='relu', input_shape=(X.shape[0],), kernel_regularizer='l2'),
-#     Dropout(0.1),
-#     Dense(16, activation='relu', kernel_regularizer='l2'),
-#     Dropout(0.1),
-#     Dense(1)
-# ])
-
-
-# model.compile(optimizer='adam',
-#               loss='mean_squared_error',
-#               metrics=['mean_squared_error'])
-
-
-# # Summary to see the architecture
-# model.summary()
-
-
-# %%
-def print_model_weights_and_biases(model):
-    for layer_idx, layer in enumerate(model.layers):
-        weights = layer.get_weights()  # Returns a list: [weights, biases]
-        print(f"Layer {layer_idx+1}: {layer.name}")
-        
-        if len(weights) > 0:  # Some layers (like Dropout) may not have weights
-            print(f"  Weights shape: {weights[0].shape}")
-            print(f"  Weights: {weights[0]}")
-            
-            if len(weights) > 1:  # If biases exist
-                print(f"  Biases shape: {weights[1].shape}")
-                print(f"  Biases: {weights[1]}")
-        else:
-            print("  No weights/biases for this layer.")
-
 # %%
 def permutation_importance(model, X_test, y_test, metric=mean_squared_error):
     baseline_score = metric(y_test, model.predict(X_test))
@@ -240,243 +328,7 @@ def permutation_importance(model, X_test, y_test, metric=mean_squared_error):
     
     return np.array(importances)
 
-# %%
-def backtest(df, model, epochsno, X, Y, train_window_size, test_window_size, drop_before_index):
-    all_predictions = []
-    early_stopping = EarlyStopping(monitor='val_loss', patience=4, restore_best_weights=True)
-    # feature_importances = np.zeros(len(X))
-    
-    scaler_X = StandardScaler()
-    scaler_Y = StandardScaler()
-
-    # Optionally drop rows before the specified index
-    if drop_before_index is not None:
-        df = df[df.index >= drop_before_index]
-
-    num_iterations = 0
-
-
-
-
-    if isinstance(Y, pd.Series):
-        Y_column = Y.name
-    else:
-        Y_column = Y
-
-    test_indices = []
-
-
-    for i in range(0, df.shape[0] - train_window_size - test_window_size + 1, test_window_size):
-
-        num_iterations += 1
-        
-        train = df.iloc[i:(i+train_window_size), :]
-        test = df.iloc[(i+train_window_size):(i+train_window_size+test_window_size), :]
-        
-        test_indices.extend(test.index)
-
-        X_train = train[X]
-        X_train = scaler_X.fit_transform(X_train)
-
-        X_test = test[X]
-        X_test = scaler_X.transform(X_test)
-        
-        Y_train = train[[Y_column]]
-        Y_train = scaler_Y.fit_transform(Y_train).reshape(-1, 1) 
-
-        Y_test = test[[Y_column]]
-        Y_test = scaler_Y.transform(Y_test).reshape(-1, 1) 
-
-        model.fit(X_train, Y_train, epochs=epochsno, verbose=1, validation_split=0.1, callbacks=[early_stopping])
-
-        preds = model.predict(X_test)
-
-        preds = scaler_Y.inverse_transform(preds).reshape(-1, 1).flatten() 
-        Y_test = scaler_Y.inverse_transform(Y_test).reshape(-1, 1).flatten()
-
-        combined = pd.DataFrame({
-            "actual": Y_test,
-            "prediction": preds
-        }, index=test.index)
-
-        combined["diff"] = (combined["prediction"] - combined["actual"]).abs()
-        all_predictions.append(combined)
-
-    #     importances = permutation_importance(model, X_test, Y_test)
-    #     feature_importances += importances
-
-
-    # avg_feature_importances = feature_importances / num_iterations
-    
-    # for i, importance in enumerate(avg_feature_importances):
-    #     print(f"Feature: {X[i]}, Importance: {importance}")
-
-    all_predictions = pd.concat(all_predictions, axis=0)
-
-    # Create a datetime index for all test predictions
-    datetime = pd.Index(test_indices)
-
-    return all_predictions, datetime
-
-# %%
-def standardtest(df, model, X, Y):
-    all_predictions = []
-    
-    scaler_X = StandardScaler()
-    scaler_Y = StandardScaler()
-
-    # Y = np.log1p(Y)
-
-    if isinstance(Y, pd.Series):
-        Y_column = Y.name
-    else:
-        Y_column = Y
-
-    X_test = df[X]
-    X_test = scaler_X.fit_transform(X_test)
-
-    # Y_test = np.log1p(test[[Y_column]])
-    Y_test = df[[Y_column]]
-    Y_test = scaler_Y.fit_transform(Y_test).reshape(-1, 1) 
-
-    preds = model.predict(X_test)
-
-    preds = scaler_Y.inverse_transform(preds).reshape(-1, 1).flatten() 
-    Y_test = scaler_Y.inverse_transform(Y_test).reshape(-1, 1).flatten()
-
-    # preds = np.expm1(preds)  # Reverse the log1p transformation.
-    # Y_test = np.expm1(Y_test)  # Reverse the log1p transformation for the test data as well.
-
-    combined = pd.DataFrame({
-        "actual": Y_test,
-        "prediction": preds
-    })
-
-    combined["diff"] = (combined["prediction"] - combined["actual"]).abs()
-
-    all_predictions.append(combined)
-
-    all_predictions = pd.concat(all_predictions, axis=0)
-
-    # Create a datetime index for all test predictions
-    datetime = df.index
-
-    return all_predictions, datetime
-
-
-# # %%
-# df, X, Y = CAMELSrun('04045500', 3, 7, 'Flow+7', True)
-
-# # %%
-# predictions, datetime1 = backtest(df, model, X, Y, 540, 60, None)
-# y_pred = predictions["prediction"]
-# y_test = predictions["actual"]
-
-# y_pred = np.maximum(y_pred, 0)  # Ensure no negative predictions
-# y_pred = np.minimum(y_pred, np.max(y_test) * 1.1)  # Cap predictions at 10% above max value of y_test
-
-# # %%
-# visualization(datetime1, y_pred, y_test, 3000,3300)
-# print_model_weights_and_biases(model)
-
-# # %%
-# df, X, Y = CAMELSrun('13340000', 3, 7, 'Flow+2', False)
-
-# # %%
-# predictions1, datetime2 = backtest(df, model, X, Y, 365, 60, None)
-
-# y_pred1 = predictions1["prediction"]
-# y_test1 = predictions1["actual"]
-
-# y_pred1 = np.maximum(y_pred1, 0)  # Ensure no negative predictions1
-# y_pred1 = np.minimum(y_pred1, np.max(y_test1) * 1.1)  # Cap predictions1 at 10% above max value of y_test
-
-# # %%
-# visualization(datetime2, y_pred1, y_test1, 3400, 3700)
-# print_model_weights_and_biases(model)
-
-# # %%
-# df, X, Y = CAMELSrun('05131500', 3, 7, 'Flow+2', False)
-
-# # %%
-# predictions2, datetime3 = backtest(df, model, X, Y, 540, 60, pd.Timestamp('2004-01-01'))
-
-# y_pred2 = predictions2["prediction"]
-# y_test2 = predictions2["actual"]
-
-# y_pred2 = np.maximum(y_pred2, 0)  # Ensure no negative predictions2
-# y_pred2 = np.minimum(y_pred2, np.max(y_test2) * 1.1)  # Cap predictions2 at 10% above max value of y_test
-
-
-# # %%
-# visualization(datetime3, y_pred2, y_test2, 0, 200)
-# print_model_weights_and_biases(model)
-
-# # %%
-# # def montecarlo(df, X, Y, num_samples=100, num_steps=7):
-
-# #     # num_steps: Number of future time steps to predict 
-# #     # num_samples: Number of Monte Carlo samples to draw
-
-# #     scaler_X = StandardScaler()
-# #     scaler_Y = StandardScaler()
-
-# #     model.trainable = True
-# #     all_predictions = []
-
-
-
-
-# #     if isinstance(Y, pd.Series):
-# #         Y_column = Y.name
-# #     else:
-# #         Y_column = Y
-
-# #     test_indices = []
-
-# #     # Fitting???
-
-# #     samples = df.iloc[-num_samples:, :]
-# #     X_samples = samples[X]
-# #     X_scaled = scaler_X.fit_transform(X_samples)
-# #     Y_samples = samples[[Y_column]]
-# #     Y_scaled = scaler_Y.fit_transform(Y_samples).reshape(-1, 1)
-
-
-# #     for _ in range(num_samples):
-# #         # Generate future predictions
-# #         predictions = []
-# #         lastX = X_scaled[-1]  # Start with the last known scaled input data
-
-# #         for _ in range(num_steps):
-# #             pred = model.predict(lastX, verbose=0)
-# #             pred = scaler_Y.inverse_transform(pred).reshape(-1, 1).flatten()    # Inverse scale the prediction
-# #             predictions.append(pred)
-
-# #             lastX = np.roll(lastX, -1)  # Shift the input data to simulate time step
-# #             lastX[-1] = pred
-
-# #         all_predictions.append(np.array(predictions).flatten())
-
-
-# #     # Convert to numpy array for easy manipulation
-# #     all_predictions = np.array(all_predictions)
-
-# #     # Calculate mean and uncertainty bounds
-# #     mean_prediction = np.mean(all_predictions, axis=0)
-# #     lower_bound = np.percentile(all_predictions, 5, axis=0)
-# #     upper_bound = np.percentile(all_predictions, 95, axis=0)
-
-# #     # Inverse scale the original last 100 Y values
-# #     Y_original_scaled = scaler_Y.inverse_transform(Y_scaled).reshape(-1, 1).flatten()
-
-# #     # Plotting
-# #     plt.plot(range(100), Y_original_scaled, label='Original Data', color='blue')
-# #     plt.plot(range(100, 130), mean_prediction, label='Forecasted Trend', color='orange')
-# #     plt.fill_between(range(100, 130), lower_bound, upper_bound, color='gray', alpha=0.5, label='95% Confidence Interval')
-# #     plt.legend()
-# #     plt.show()
-
-# # montecarlo(df, X, Y)
-
-
+def print_model_weights_and_biases(model):
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f"{name}: {param.shape}\n{param.data}")
