@@ -1,7 +1,7 @@
 # Flood Prediction Research
 
 ## Overview
-This repository contains research conducted as part of an undergraduate summer internship at [Your University]. The project was carried out in collaboration with a friend and under the supervision of a professor. The primary goal was to develop machine learning models to predict floods, particularly in response to the devastating 2022 Pakistan floods. Due to the lack of accessible data from Pakistan, the research was conducted using the open-source CAMELS dataset.
+This repository contains research conducted as part of an undergraduate summer internship at the University of Nottingham Malaysia. The project was carried out in collaboration with a friend and under the supervision of a professor. The primary goal was to develop machine learning models to predict floods, particularly in response to the devastating 2022 Pakistan floods. Due to the lack of accessible data from Pakistan, the research was conducted using the open-source CAMELS dataset.
 
 ## Objectives
 - Develop a reliable flood prediction model tailored for Pakistan, focusing on the Upper Indus Basin.
